@@ -1,7 +1,8 @@
 const {resolve} = require('path');
 const {DefinePlugin} = require('webpack');
+const TerserPlugin = require('terser-webpack-plugin');
 const {
-  getGitHubURL,
+  GITHUB_URL,
   getVersionString,
 } = require('react-devtools-extensions/utils');
 
@@ -13,7 +14,6 @@ if (!NODE_ENV) {
 
 const __DEV__ = true; // NODE_ENV === 'development';
 
-const GITHUB_URL = getGitHubURL();
 const DEVTOOLS_VERSION = getVersionString();
 
 module.exports = {
@@ -37,9 +37,21 @@ module.exports = {
     'react-is': 'react-is',
     scheduler: 'scheduler',
   },
+  optimization: {
+    minimizer: [
+      new TerserPlugin({
+        terserOptions: {
+          compress: {drop_debugger: false},
+          output: {comments: true},
+        },
+      }),
+    ],
+  },
   plugins: [
     new DefinePlugin({
       __DEV__,
+      __PROFILE__: false,
+      __EXPERIMENTAL__: true,
       'process.env.DEVTOOLS_VERSION': `"${DEVTOOLS_VERSION}"`,
       'process.env.GITHUB_URL': `"${GITHUB_URL}"`,
       'process.env.NODE_ENV': `"${NODE_ENV}"`,

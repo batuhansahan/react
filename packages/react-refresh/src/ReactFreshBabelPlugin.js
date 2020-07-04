@@ -7,7 +7,7 @@
 
 'use strict';
 
-export default function(babel, opts) {
+export default function(babel, opts = {}) {
   if (typeof babel.getEnv === 'function') {
     // Only available in Babel 7.
     const env = babel.getEnv();
@@ -22,6 +22,8 @@ export default function(babel, opts) {
   }
 
   const {types: t} = babel;
+  const refreshReg = t.identifier(opts.refreshReg || '$RefreshReg$');
+  const refreshSig = t.identifier(opts.refreshSig || '$RefreshSig$');
 
   const registrationsByProgramPath = new Map();
   function createRegistration(programPath, persistentID) {
@@ -169,6 +171,7 @@ export default function(babel, opts) {
         for (let i = 0; i < referencePaths.length; i++) {
           const ref = referencePaths[i];
           if (
+            ref.node &&
             ref.node.type !== 'JSXIdentifier' &&
             ref.node.type !== 'Identifier'
           ) {
@@ -249,7 +252,7 @@ export default function(babel, opts) {
     };
   }
 
-  let hasForceResetCommentByFile = new WeakMap();
+  const hasForceResetCommentByFile = new WeakMap();
 
   // We let user do /* @refresh reset */ to reset state in the whole file.
   function hasForceResetComment(path) {
@@ -277,7 +280,7 @@ export default function(babel, opts) {
     const {key, customHooks} = signature;
 
     let forceReset = hasForceResetComment(scope.path);
-    let customHooksInScope = [];
+    const customHooksInScope = [];
     customHooks.forEach(callee => {
       // Check if a corresponding binding exists where we emit the signature.
       let bindingName;
@@ -300,7 +303,20 @@ export default function(babel, opts) {
       }
     });
 
-    const args = [node, t.stringLiteral(key)];
+    let finalKey = key;
+    if (typeof require === 'function' && !opts.emitFullSignatures) {
+      // Prefer to hash when we can (e.g. outside of ASTExplorer).
+      // This makes it deterministically compact, even if there's
+      // e.g. a useState initializer with some code inside.
+      // We also need it for www that has transforms like cx()
+      // that don't understand if something is part of a string.
+      finalKey = require('crypto')
+        .createHash('sha1')
+        .update(key)
+        .digest('base64');
+    }
+
+    const args = [node, t.stringLiteral(finalKey)];
     if (forceReset || customHooksInScope.length > 0) {
       args.push(t.booleanLiteral(forceReset));
     }
@@ -320,11 +336,11 @@ export default function(babel, opts) {
     return args;
   }
 
-  let seenForRegistration = new WeakSet();
-  let seenForSignature = new WeakSet();
-  let seenForOutro = new WeakSet();
+  const seenForRegistration = new WeakSet();
+  const seenForSignature = new WeakSet();
+  const seenForOutro = new WeakSet();
 
-  let hookCalls = new WeakMap();
+  const hookCalls = new WeakMap();
   const HookCallsVisitor = {
     CallExpression(path) {
       const node = path.node;
@@ -355,7 +371,7 @@ export default function(babel, opts) {
       if (!hookCalls.has(fnNode)) {
         hookCalls.set(fnNode, []);
       }
-      let hookCallsForFn = hookCalls.get(fnNode);
+      const hookCallsForFn = hookCalls.get(fnNode);
       let key = '';
       if (path.parent.type === 'VariableDeclarator') {
         // TODO: if there is no LHS, consider some other heuristic.
@@ -504,7 +520,7 @@ export default function(babel, opts) {
           const sigCallID = path.scope.generateUidIdentifier('_s');
           path.scope.parent.push({
             id: sigCallID,
-            init: t.callExpression(t.identifier('$RefreshSig$'), []),
+            init: t.callExpression(refreshSig, []),
           });
 
           // The signature call is split in two parts. One part is called inside the function.
@@ -521,7 +537,7 @@ export default function(babel, opts) {
 
           // Unlike with $RefreshReg$, this needs to work for nested
           // declarations too. So we need to search for a path where
-          // we can insert a statement rather than hardcoding it.
+          // we can insert a statement rather than hard coding it.
           let insertAfterPath = null;
           path.find(p => {
             if (p.parentPath.isBlock()) {
@@ -566,7 +582,7 @@ export default function(babel, opts) {
           const sigCallID = path.scope.generateUidIdentifier('_s');
           path.scope.parent.push({
             id: sigCallID,
-            init: t.callExpression(t.identifier('$RefreshSig$'), []),
+            init: t.callExpression(refreshSig, []),
           });
 
           // The signature call is split in two parts. One part is called inside the function.
@@ -674,16 +690,15 @@ export default function(babel, opts) {
               return;
             }
             const handle = createRegistration(programPath, persistentID);
-            if (
-              (targetExpr.type === 'ArrowFunctionExpression' ||
-                targetExpr.type === 'FunctionExpression') &&
-              targetPath.parent.type === 'VariableDeclarator'
-            ) {
-              // Special case when a function would get an inferred name:
+            if (targetPath.parent.type === 'VariableDeclarator') {
+              // Special case when a variable would get an inferred name:
               // let Foo = () => {}
               // let Foo = function() {}
+              // let Foo = styled.div``;
               // We'll register it on next line so that
               // we don't mess up the inferred 'Foo' function name.
+              // (eg: with @babel/plugin-transform-react-display-name or
+              // babel-plugin-styled-components)
               insertAfterPath.insertAfter(
                 t.expressionStatement(
                   t.assignmentExpression('=', handle, declPath.node.id),
@@ -695,7 +710,7 @@ export default function(babel, opts) {
               targetPath.replaceWith(
                 t.assignmentExpression('=', handle, targetExpr),
               );
-              // Result: let Foo = _c1 = hoc(() => {})
+              // Result: let Foo = hoc(_c1 = () => {})
             }
           },
         );
@@ -730,7 +745,7 @@ export default function(babel, opts) {
             path.pushContainer(
               'body',
               t.expressionStatement(
-                t.callExpression(t.identifier('$RefreshReg$'), [
+                t.callExpression(refreshReg, [
                   handle,
                   t.stringLiteral(persistentID),
                 ]),
